@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Wrench,
   AlertCircle,
@@ -15,6 +15,10 @@ import {
   Activity
 } from 'lucide-react';
 import versionInfo from './version.json';
+import { issueReportSimpleService } from './services/issueReportSimple.service';
+import { equipmentService } from './services/equipment.service';
+import { issueService } from './services/issue.service';
+import { supabase } from './lib/supabase';
 
 function App() {
   // Staff members directory
@@ -33,7 +37,7 @@ function App() {
     { name: 'Amand Rajak', role: 'Service Engineer', department: 'Maintenance' }
   ];
 
-  // Initial equipment data
+  // Initial equipment data (mock data as fallback)
   const [equipment, setEquipment] = useState([
     {
       id: 'EQ-001',
@@ -333,6 +337,7 @@ function App() {
       images: []
     }
   ]);
+  const [loading, setLoading] = useState(false);
 
   const [activityLog, setActivityLog] = useState([
     {
@@ -355,6 +360,77 @@ function App() {
     reportedBy: '',
     images: []
   });
+
+  // Fetch issues from Supabase and update equipment with issue details
+  useEffect(() => {
+    const fetchIssuesAndUpdateEquipment = async () => {
+      try {
+        console.log('🔄 Fetching issues with equipment details from Supabase...');
+        setLoading(true);
+
+        // Fetch all issues with equipment details using join
+        const { data: issuesWithEquipment, error } = await supabase
+          .from('issues')
+          .select(`
+            *,
+            equipment!inner(
+              id,
+              equipment_id,
+              name
+            )
+          `)
+          .order('created_at', { ascending: false });
+
+        if (error) {
+          console.error('❌ Error fetching issues:', error);
+          throw error;
+        }
+
+        console.log(`✅ Fetched ${issuesWithEquipment?.length || 0} issues from database`);
+        console.log('Issues data:', issuesWithEquipment);
+
+        if (issuesWithEquipment && issuesWithEquipment.length > 0) {
+          // Update equipment state with issue information
+          setEquipment(prevEquipment =>
+            prevEquipment.map(eq => {
+              // Find latest issue for this equipment by matching equipment_id (EQ-001, etc.)
+              const equipmentIssues = issuesWithEquipment.filter(issue => {
+                const dbEquipmentId = issue.equipment?.equipment_id;
+                return dbEquipmentId && dbEquipmentId === eq.id;
+              });
+
+              const latestIssue = equipmentIssues.length > 0 ? equipmentIssues[0] : null;
+
+              // If issue exists, update equipment with issue details
+              if (latestIssue) {
+                console.log(`🔧 Updating ${eq.id} with issue:`, latestIssue.description);
+                return {
+                  ...eq,
+                  status: 'Needs Repair',
+                  issueDescription: latestIssue.description,
+                  reportedBy: latestIssue.reported_by,
+                  images: latestIssue.attachments || []
+                };
+              }
+
+              return eq; // Return equipment as-is if no issues
+            })
+          );
+
+          console.log('✅ Equipment updated with issue data from database');
+        } else {
+          console.log('ℹ️ No issues found in database, using mock data as-is');
+        }
+      } catch (error) {
+        console.error('⚠️ Error fetching issues:', error);
+        console.log('Using mock data without Supabase integration');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchIssuesAndUpdateEquipment();
+  }, []);
 
   // Filter equipment based on selected location and category
   const filteredEquipment = equipment.filter(eq => {
@@ -445,51 +521,73 @@ Please attend to this issue at the earliest.
   };
 
   // Submit issue report
-  const submitIssueReport = () => {
+  const submitIssueReport = async () => {
     if (!issueForm.description || !issueForm.reportedBy) {
       alert('Please fill in all required fields');
       return;
     }
 
-    const reportTimestamp = new Date();
+    try {
+      const reportTimestamp = new Date();
 
-    // Update equipment status
-    setEquipment(equipment.map(eq =>
-      eq.id === selectedEquipment.id
-        ? {
-            ...eq,
-            status: 'Needs Repair',
-            issueDescription: issueForm.description,
-            reportedBy: issueForm.reportedBy,
-            images: issueForm.images,
-            reportTimestamp: reportTimestamp
-          }
-        : eq
-    ));
+      console.log('🚀 Submitting issue report to Supabase...');
+      console.log('Selected Equipment:', selectedEquipment);
+      console.log('Issue Form:', issueForm);
 
-    // Add to activity log
-    const newActivity = {
-      id: activityLog.length + 1,
-      timestamp: reportTimestamp,
-      action: 'Issue Reported',
-      equipmentName: selectedEquipment.name,
-      location: selectedEquipment.location,
-      description: `${issueForm.description} reported by ${issueForm.reportedBy}`,
-      images: issueForm.images
-    };
-    setActivityLog([newActivity, ...activityLog]);
+      // Submit to Supabase (without photos for now)
+      const createdIssue = await issueReportSimpleService.submitIssueReport({
+        equipmentId: selectedEquipment.id,
+        issueDescription: issueForm.description,
+        reportedBy: issueForm.reportedBy,
+        severity: 'moderate' // You can add a severity selector in the form
+      });
 
-    // Send WhatsApp notification to service engineer
-    sendWhatsAppNotification(
-      selectedEquipment,
-      issueForm.description,
-      issueForm.reportedBy,
-      reportTimestamp
-    );
+      console.log('✅ Issue created in Supabase:', createdIssue);
 
-    // Close modal
-    setShowReportModal(false);
-    setSelectedEquipment(null);
+      // Update local state for immediate UI feedback
+      setEquipment(equipment.map(eq =>
+        eq.id === selectedEquipment.id
+          ? {
+              ...eq,
+              status: 'Needs Repair',
+              issueDescription: issueForm.description,
+              reportedBy: issueForm.reportedBy,
+              images: issueForm.images,
+              reportTimestamp: reportTimestamp
+            }
+          : eq
+      ));
+
+      // Add to activity log (local state)
+      const newActivity = {
+        id: activityLog.length + 1,
+        timestamp: reportTimestamp,
+        action: 'Issue Reported',
+        equipmentName: selectedEquipment.name,
+        location: selectedEquipment.location,
+        description: `${issueForm.description} reported by ${issueForm.reportedBy}`,
+        images: issueForm.images
+      };
+      setActivityLog([newActivity, ...activityLog]);
+
+      // Send WhatsApp notification to service engineer
+      sendWhatsAppNotification(
+        selectedEquipment,
+        issueForm.description,
+        issueForm.reportedBy,
+        reportTimestamp
+      );
+
+      // Show success message
+      alert('Issue reported successfully and saved to database!');
+
+      // Close modal
+      setShowReportModal(false);
+      setSelectedEquipment(null);
+    } catch (error) {
+      console.error('Error submitting issue report:', error);
+      alert('Failed to submit issue report. Please try again.');
+    }
   };
 
   // Mark equipment as resolved
@@ -657,8 +755,21 @@ Please attend to this issue at the earliest.
         </div>
 
         {/* Equipment Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">
-          {filteredEquipment.map(eq => (
+        {loading ? (
+          <div className="flex items-center justify-center py-20">
+            <div className="text-center">
+              <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
+              <p className="text-gray-600">Loading equipment data from database...</p>
+            </div>
+          </div>
+        ) : equipment.length === 0 ? (
+          <div className="text-center py-20">
+            <p className="text-gray-600 text-lg mb-2">No equipment found in database</p>
+            <p className="text-gray-500 text-sm">Please add equipment data to Supabase</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">
+            {filteredEquipment.map(eq => (
             <div
               key={eq.id}
               className="bg-white/90 backdrop-blur-sm rounded-xl sm:rounded-2xl shadow-xl border border-gray-200/50 overflow-hidden active:shadow-2xl sm:hover:shadow-2xl transition-all duration-300 sm:transform sm:hover:-translate-y-1"
@@ -775,8 +886,9 @@ Please attend to this issue at the earliest.
                 </div>
               </div>
             </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
 
         {/* Activity Log */}
         <div className="bg-white/90 backdrop-blur-sm rounded-xl sm:rounded-2xl shadow-xl border border-gray-200/50 p-4 sm:p-6">
